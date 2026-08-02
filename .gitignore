@@ -1,0 +1,10 @@
+MDK-ARM/
+*.o
+*.d
+*.axf
+*.hex
+*.map
+*.uvoptx
+*.uvgui.*
+Debug/
+Release/
