@@ -21,7 +21,7 @@
 
 ##  系统架构设计
 
-![任务架构图](Images/architecture.png)
+![任务架构图](images/architecture.png)
 
 ##  核心任务分解
 
@@ -74,8 +74,8 @@
   **电源警告**：ESP8266 模块必须由 3.3V 供电，**禁止直接接 5V**建议由 STM32 开发板的 3.3V 排针为 ESP8266 VCC 供电，以确保联网时大电流稳定。
 
 
-![实物图](Images/hardware.jpg)
+![实物图](images/hardware.jpg)
 *硬件实物连接及 OLED 实时显示*
 
-![数据图](Images/data.jpg)
+![数据图](images/data.jpg)
 *平板 TCP 服务端接收到的温湿度数据流*
