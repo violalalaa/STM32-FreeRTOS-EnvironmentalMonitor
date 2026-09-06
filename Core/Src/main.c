@@ -22,7 +22,8 @@
 #include "dht.h"
 #include "oled.h"
 #include "delay.h"
-
+#include "stdint.h"
+#include "stdio.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -46,6 +47,8 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+IWDG_HandleTypeDef hiwdg;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
@@ -60,7 +63,7 @@ const osThreadAttr_t DHT_Task_attributes = {
 osThreadId_t OLED_TaskHandle;
 const osThreadAttr_t OLED_Task_attributes = {
   .name = "OLED_Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for Key_Task */
@@ -74,7 +77,7 @@ const osThreadAttr_t Key_Task_attributes = {
 osThreadId_t WiFi_TaskHandle;
 const osThreadAttr_t WiFi_Task_attributes = {
   .name = "WiFi_Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for StatusLEDTask */
@@ -82,6 +85,13 @@ osThreadId_t StatusLEDTaskHandle;
 const osThreadAttr_t StatusLEDTask_attributes = {
   .name = "StatusLEDTask",
   .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for WatchDogTask */
+osThreadId_t WatchDogTaskHandle;
+const osThreadAttr_t WatchDogTask_attributes = {
+  .name = "WatchDogTask",
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
 /* Definitions for Queue_OLED */
@@ -111,11 +121,13 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_IWDG_Init(void);
 void StartDHTTask(void *argument);
 void StartOLEDTask(void *argument);
 void StartKeyTask(void *argument);
 void StartWiFiTask(void *argument);
 void StartStatusLEDTask(void *argument);
+void StartWatchDogTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -158,9 +170,12 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
     OLED_Init();
 		delay_init();
+  	HAL_IWDG_Refresh(&hiwdg);         
+    __HAL_DBGMCU_FREEZE_IWDG();       
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -209,6 +224,9 @@ int main(void)
   /* creation of StatusLEDTask */
   StatusLEDTaskHandle = osThreadNew(StartStatusLEDTask, NULL, &StatusLEDTask_attributes);
 
+  /* creation of WatchDogTask */
+  WatchDogTaskHandle = osThreadNew(StartWatchDogTask, NULL, &WatchDogTask_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -245,10 +263,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
@@ -303,6 +322,34 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg.Init.Reload = 4095;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -412,9 +459,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : KEY0_Pin */
   GPIO_InitStruct.Pin = KEY0_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(KEY0_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -513,6 +564,24 @@ __weak void StartStatusLEDTask(void *argument)
     osDelay(1);
   }
   /* USER CODE END StartStatusLEDTask */
+}
+
+/* USER CODE BEGIN Header_StartWatchDogTask */
+/**
+* @brief Function implementing the WatchDogTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartWatchDogTask */
+__weak void StartWatchDogTask(void *argument)
+{
+  /* USER CODE BEGIN StartWatchDogTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartWatchDogTask */
 }
 
 /**

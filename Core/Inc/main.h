@@ -61,6 +61,7 @@ void Error_Handler(void);
 #define DHT_DAT_GPIO_Port GPIOA
 #define KEY0_Pin GPIO_PIN_11
 #define KEY0_GPIO_Port GPIOA
+#define KEY0_EXTI_IRQn EXTI15_10_IRQn
 
 /* USER CODE BEGIN Private defines */
 
