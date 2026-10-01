@@ -33,6 +33,9 @@ static int rtc_wait_rtoff(void)
 static int rtc_sync(void)
 {
     uint32_t n = 1000000u;
+
+    /* 先等上一次写完，再清 RSF。写没完成就清，计数器会一直读成 0，闹钟落在过去，永远不响。 */
+    if (rtc_wait_rtoff() != 0) return -1;
     RTC->CRL &= (uint16_t)~RTC_CRL_RSF;
     while ((RTC->CRL & RTC_CRL_RSF) == 0u) {
         if (--n == 0u) return -1;
@@ -40,24 +43,83 @@ static int rtc_sync(void)
     return 0;
 }
 
+static int rtc_read_cnt(uint32_t *cnt)
+{
+    uint16_t hi;
+    uint16_t lo;
+    uint16_t hi2;
+
+    if (rtc_sync() != 0) return -1;
+    hi = (uint16_t)RTC->CNTH;
+    lo = (uint16_t)RTC->CNTL;
+    hi2 = (uint16_t)RTC->CNTH;
+    if (hi != hi2) {
+        hi = hi2;
+        lo = (uint16_t)RTC->CNTL;
+    }
+    *cnt = ((uint32_t)hi << 16) | lo;
+    return 0;
+}
+
+static void rtc_exti_enable(void)
+{
+    EXTI->IMR |= EXTI_IMR_MR17;
+    EXTI->RTSR |= EXTI_RTSR_TR17;
+    EXTI->PR = EXTI_PR_PR17;
+    /* 5 会被 FreeRTOS 临界区挡住。这个中断不调 FreeRTOS，放到 4，WFI 才等得到。 */
+    HAL_NVIC_SetPriority(RTC_Alarm_IRQn, 4, 0);
+    HAL_NVIC_EnableIRQ(RTC_Alarm_IRQn);
+    NVIC_ClearPendingIRQ(RTC_Alarm_IRQn);
+}
+
+static void rtc_clear_alarm_pending(void)
+{
+    if (rtc_wait_rtoff() == 0) {
+        RTC->CRL &= (uint16_t)~RTC_CRL_ALRF;
+        (void)rtc_wait_rtoff();
+    }
+    EXTI->PR = EXTI_PR_PR17;
+    NVIC_ClearPendingIRQ(RTC_Alarm_IRQn);
+}
+
 static int RTC_ArmInSeconds(uint32_t seconds)
 {
     uint32_t now;
+    uint32_t again;
     uint32_t alarm;
+    uint32_t programmed;
 
-    if (rtc_wait_rtoff() != 0) return -1;
-    now = ((uint32_t)RTC->CNTH << 16) | (RTC->CNTL & 0xFFFFu);
+    HAL_PWR_EnableBkUpAccess();
+    if (rtc_read_cnt(&now) != 0) return -1;
     alarm = now + seconds;
-
-    RTC->CRL &= (uint16_t)~RTC_CRL_ALRF;
-    EXTI->PR = EXTI_PR_PR17;
 
     if (rtc_wait_rtoff() != 0) return -1;
     RTC->CRL |= RTC_CRL_CNF;
-    RTC->ALRH = (alarm >> 16) & 0xFFFFu;
-    RTC->ALRL = alarm & 0xFFFFu;
+    RTC->ALRH = (uint16_t)((alarm >> 16) & 0xFFFFu);
+    RTC->ALRL = (uint16_t)(alarm & 0xFFFFu);
+    RTC->CRH |= RTC_CRH_ALRIE;
     RTC->CRL &= (uint16_t)~RTC_CRL_CNF;
-    return rtc_wait_rtoff();
+    if (rtc_wait_rtoff() != 0) return -1;
+
+    programmed = ((uint32_t)(RTC->ALRH & 0xFFFFu) << 16) | (RTC->ALRL & 0xFFFFu);
+    if (programmed != alarm) return -1;
+
+    {
+        uint16_t hi = (uint16_t)RTC->CNTH;
+        uint16_t lo = (uint16_t)RTC->CNTL;
+        uint16_t hi2 = (uint16_t)RTC->CNTH;
+        if (hi != hi2) {
+            hi = hi2;
+            lo = (uint16_t)RTC->CNTL;
+        }
+        again = ((uint32_t)hi << 16) | lo;
+    }
+    if (again >= alarm) return -1;
+
+    /* 新闹钟写完再清标志。旧标志还挂着的话，下一次相等不会再产生上升沿，WFI 就醒不来。 */
+    rtc_exti_enable();
+    rtc_clear_alarm_pending();
+    return 0;
 }
 
 static int rtc_setup(void)
@@ -94,12 +156,7 @@ static int rtc_setup(void)
     if (rtc_wait_rtoff() != 0) return -1;
 
     RTC->CRL &= (uint16_t)~RTC_CRL_ALRF;
-    EXTI->IMR |= EXTI_IMR_MR17;
-    EXTI->RTSR |= EXTI_RTSR_TR17;
-    EXTI->PR = EXTI_PR_PR17;
-
-    HAL_NVIC_SetPriority(RTC_Alarm_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(RTC_Alarm_IRQn);
+    rtc_exti_enable();
     return 0;
 }
 
@@ -161,6 +218,8 @@ void RTC_Alarm_IRQHandler(void)
 
 void Enter_StopMode(void)
 {
+    uint8_t fail = 0;
+
     OLED_Clear();
     OLED_ShowString(1, 2, "Sleeping...");
     osDelay(500);
@@ -172,20 +231,33 @@ void Enter_StopMode(void)
     g_wakeup_by_key = 0;
     g_rtc_wakeup = 0;
 
-    vTaskSuspendAll();
-    do {
+    if (s_rtc_ok == 0u) {
+        fail = 1u;
+    } else {
         HAL_IWDG_Refresh(&hiwdg);
-        if (s_rtc_ok != 0u) {
-            (void)RTC_ArmInSeconds(STOP_SLICE_SEC);
-        }
-        g_rtc_wakeup = 0;
-        stop_ticks();
-        HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
-        HAL_IWDG_Refresh(&hiwdg);
-        SystemClock_Config();
-        resume_ticks();
-    } while ((s_rtc_ok != 0u) && (g_wakeup_by_key == 0u));
-    xTaskResumeAll();
+        printf("STOP slice\r\n");
+        vTaskSuspendAll();
+        do {
+            HAL_IWDG_Refresh(&hiwdg);
+            if (g_wakeup_by_key != 0u) {
+                break;
+            }
+            if (RTC_ArmInSeconds(STOP_SLICE_SEC) != 0) {
+                fail = 2u;
+                break;
+            }
+            if (g_wakeup_by_key != 0u) {
+                break;
+            }
+            g_rtc_wakeup = 0;
+            stop_ticks();
+            HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+            HAL_IWDG_Refresh(&hiwdg);
+            SystemClock_Config();
+            resume_ticks();
+        } while (g_wakeup_by_key == 0u);
+        xTaskResumeAll();
+    }
 
     ESP8266_PowerOn();
     ESP8266_RequestRestart();
@@ -197,4 +269,9 @@ void Enter_StopMode(void)
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
     osDelay(200);
     OLED_Clear();
+    if (fail == 1u) {
+        printf("RTC not ready\r\n");
+    } else if (fail == 2u) {
+        printf("RTC arm fail\r\n");
+    }
 }

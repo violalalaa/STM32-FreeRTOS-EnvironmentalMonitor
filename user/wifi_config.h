@@ -6,8 +6,8 @@
  * PB0 可以不接，休眠时模块不会掉电，唤醒后仍会重新入网。
  */
 #define WIFI_SSID   "wifi名称"
-#define WIFI_PASS   "密码"
+#define WIFI_PASS   "wifi密码"
 #define TCP_HOST    "ip地址"
-#define TCP_PORT    "接口"
+#define TCP_PORT    "端口号"
 
 #endif
