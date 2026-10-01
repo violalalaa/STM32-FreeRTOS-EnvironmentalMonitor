@@ -25,6 +25,11 @@ void OLED_SetCursor(uint8_t Y, uint8_t X)
 }
 
 /* ---------- 清屏 ---------- */
+void OLED_DisplayOff(void)
+{
+    OLED_WriteCommand(0xAE);
+}
+
 void OLED_Clear(void)
 {
     uint8_t i, j;
@@ -61,6 +66,25 @@ void OLED_ShowString(uint8_t Line, uint8_t Column, char *String)
     for (i = 0; String[i] != '\0'; i++)
     {
         OLED_ShowChar(Line, Column + i, String[i]);
+    }
+}
+
+static uint32_t OLED_Pow(uint32_t base, uint32_t exp)
+{
+    uint32_t result = 1;
+    while (exp--)
+    {
+        result *= base;
+    }
+    return result;
+}
+
+void OLED_ShowNum(uint8_t Line, uint8_t Column, uint32_t Number, uint8_t Length)
+{
+    uint8_t i;
+    for (i = 0; i < Length; i++)
+    {
+        OLED_ShowChar(Line, Column + i, Number / OLED_Pow(10, Length - i - 1) % 10 + '0');
     }
 }
 void OLED_Init(void)

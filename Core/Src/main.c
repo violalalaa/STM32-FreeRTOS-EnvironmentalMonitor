@@ -26,7 +26,8 @@
 #include "stdio.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "power.h"
+#include "esp8266.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -70,7 +71,7 @@ const osThreadAttr_t OLED_Task_attributes = {
 osThreadId_t Key_TaskHandle;
 const osThreadAttr_t Key_Task_attributes = {
   .name = "Key_Task",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for WiFi_Task */
@@ -92,7 +93,7 @@ osThreadId_t WatchDogTaskHandle;
 const osThreadAttr_t WatchDogTask_attributes = {
   .name = "WatchDogTask",
   .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for Queue_OLED */
 osMessageQueueId_t Queue_OLEDHandle;
@@ -174,8 +175,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
     OLED_Init();
 		delay_init();
-  	HAL_IWDG_Refresh(&hiwdg);         
-    __HAL_DBGMCU_FREEZE_IWDG();       
+    ESP8266_Init();
+    Power_LogResetReason();
+    Power_Init();
+  	HAL_IWDG_Refresh(&hiwdg);
+    __HAL_DBGMCU_FREEZE_IWDG();
   /* USER CODE END 2 */
 
   /* Init scheduler */

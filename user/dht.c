@@ -51,46 +51,51 @@ static int8_t DHT_Read_Byte(uint8_t *byte)
     return 0;
 }
 
+/* 应答和 40 位数据。调用方已关中断。 */
+static int8_t DHT_Read_Locked(uint8_t buf[5])
+{
+    uint8_t i;
+    uint32_t timeout;
+
+    timeout = 10000;
+    while (HAL_GPIO_ReadPin(DHT_PORT, DHT_PIN) == GPIO_PIN_SET) {
+        if (--timeout == 0) return -1;
+    }
+    timeout = 10000;
+    while (HAL_GPIO_ReadPin(DHT_PORT, DHT_PIN) == GPIO_PIN_RESET) {
+        if (--timeout == 0) return -2;
+    }
+    timeout = 10000;
+    while (HAL_GPIO_ReadPin(DHT_PORT, DHT_PIN) == GPIO_PIN_SET) {
+        if (--timeout == 0) return -3;
+    }
+    for (i = 0; i < 5; i++) {
+        if (DHT_Read_Byte(&buf[i]) != 0) return -4;
+    }
+    return 0;
+}
+
 int8_t DHT_Read_Data(DHT_Data_t *data)
 {
     uint8_t buf[5];
-    uint8_t i;
-    uint32_t timeout;
-    // 进入临界区（关闭所有中断，保证时序）
-    taskENTER_CRITICAL();
+    int8_t ret;
 
-    /* 1. 主机发送起始信号 */
+    /*
+     * 采集任务已是最高业务优先级，其他任务抢占不了这段时序。
+     * 会打断单总线的是 SysTick / TIM4 / USART 中断。
+     * 18ms 起始信号不要求微秒级，不关中断；只在应答和判位时关。
+     */
     DHT_Mode_Out();
     HAL_GPIO_WritePin(DHT_PORT, DHT_PIN, GPIO_PIN_RESET);
-    delay_ms(18);                       
+    delay_ms(18);
     HAL_GPIO_WritePin(DHT_PORT, DHT_PIN, GPIO_PIN_SET);
-    delay_us(30);                       
+    delay_us(30);
     DHT_Mode_In();
-    // DHT11 拉低总线（响应开始）
-    timeout = 10000;
-    while (HAL_GPIO_ReadPin(DHT_PORT, DHT_PIN) == GPIO_PIN_SET) {
-        if (--timeout == 0) { taskEXIT_CRITICAL(); return -1; }
-    }
-    // DHT11 拉高总线（80μs 低电平结束）
-    timeout = 10000;
-    while (HAL_GPIO_ReadPin(DHT_PORT, DHT_PIN) == GPIO_PIN_RESET) {
-        if (--timeout == 0) { taskEXIT_CRITICAL(); return -2; }
-    }
-    // DHT11 再次拉低（准备开始传输数据）
-    timeout = 10000;
-    while (HAL_GPIO_ReadPin(DHT_PORT, DHT_PIN) == GPIO_PIN_SET) {
-        if (--timeout == 0) { taskEXIT_CRITICAL(); return -3; }
-    }
 
-    /* 3. 读取 5 个字节 */
-    for (i = 0; i < 5; i++) {
-        if (DHT_Read_Byte(&buf[i]) != 0) {
-            taskEXIT_CRITICAL();
-            return -4;
-        }
-    }
-    // 数据读完，退出临界区 
+    taskENTER_CRITICAL();
+    ret = DHT_Read_Locked(buf);
     taskEXIT_CRITICAL();
+    if (ret != 0) return ret;
 
     if ((buf[0] + buf[1] + buf[2] + buf[3]) != buf[4]) {
         return -5;

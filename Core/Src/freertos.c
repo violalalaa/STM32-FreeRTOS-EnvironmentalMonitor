@@ -56,11 +56,27 @@
 void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName);
 
 /* USER CODE BEGIN 4 */
+static void uart1_puts(const char *s)
+{
+  if (s == NULL) return;
+  while (*s != '\0') {
+    while ((USART1->SR & USART_SR_TXE) == 0u) {
+    }
+    USART1->DR = (uint8_t)*s++;
+  }
+}
+
 void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName)
 {
-   /* Run time stack overflow checking is performed if
-   configCHECK_FOR_STACK_OVERFLOW is defined to 1 or 2. This hook function is
-   called if a stack overflow is detected. */
+  (void)xTask;
+  uart1_puts("\r\nSTACK ");
+  uart1_puts((const char *)pcTaskName);
+  uart1_puts("\r\n");
+  for (;;) {
+    GPIOC->ODR ^= GPIO_ODR_ODR13;
+    for (volatile uint32_t i = 0; i < 200000u; i++) {
+    }
+  }
 }
 /* USER CODE END 4 */
 

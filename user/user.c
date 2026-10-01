@@ -6,13 +6,14 @@
 #include "cmsis_os.h"
 #include "esp8266.h"
 #include "power.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #define KEY0_Pin       GPIO_PIN_11
 #define KEY0_GPIO_Port GPIOA
 extern osSemaphoreId_t Sem_KeyHandle;
 extern osMessageQueueId_t Queue_OLEDHandle;
 extern osMessageQueueId_t Queue_WiFiHandle;
-extern UART_HandleTypeDef huart1; 
-extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart1;
 extern IWDG_HandleTypeDef hiwdg;
 extern volatile uint8_t g_wakeup_by_key;
 volatile uint8_t g_dht_error_count = 0;
@@ -20,6 +21,17 @@ volatile uint8_t g_wifi_error_count = 0;
 volatile uint32_t g_heartbeat_dht  = 0;
 volatile uint32_t g_heartbeat_oled = 0;
 volatile uint32_t g_heartbeat_key  = 0;
+volatile uint32_t g_heartbeat_wifi = 0;
+
+extern osThreadId_t DHT_TaskHandle;
+extern osThreadId_t OLED_TaskHandle;
+extern osThreadId_t Key_TaskHandle;
+extern osThreadId_t WiFi_TaskHandle;
+
+void ESP8266_NotifyAlive(void)
+{
+    g_heartbeat_wifi = osKernelGetTickCount();
+}
 int fputc(int ch, FILE *f) {
     HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 0xFFFF); 
     return ch;
@@ -115,43 +127,42 @@ void StartOLEDTask(void *argument) {
                 OLED_ShowString(3, 1, "Humi: ");
                 OLED_ShowString(3, 2, humi_str);
             } else {
-                OLED_ShowString(3, 3, "violalalaa");
+                OLED_ShowString(1, 1, "WiFi:");
+                OLED_ShowNum(1, 7, g_wifi_error_count, 2);
+                OLED_ShowString(2, 1, "DHT:");
+                OLED_ShowNum(2, 7, g_dht_error_count, 2);
+                OLED_ShowString(3, 1, "Join:");
+                OLED_ShowNum(3, 7, ESP8266_FailStreak(), 2);
             }
         }
         osDelay(500);
     }
 }
 void StartWiFiTask(void *argument) {
-    // 1. 初始化 WiFi 和连接
-    HAL_UART_Transmit(&huart2, (uint8_t*)"ATE0\r\n", 6, 1000); osDelay(200);
-    HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWMODE=1\r\n", 13, 1000); osDelay(200);
-	HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWJAP=\"WIFI名称\",\"WIFI密码\"\r\n", 100, 2000); osDelay(5000); 
-    HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPMODE=0\r\n", 15, 1000); osDelay(200);
-    // 尝试建立第一次 TCP 连接
-    HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPSTART=\"TCP\",\"服务端IP\",8899\r\n", 100, 2000); osDelay(2000);
     DHT_Data_t wifi_data;
-    char send_buf[50];
-    uint8_t connect_ok = 0;
+    char send_buf[48];
+    g_heartbeat_wifi = osKernelGetTickCount();
     for(;;) {
-        if (osMessageQueueGet(Queue_WiFiHandle, &wifi_data, NULL, osWaitForever) == osOK) {
-            sprintf(send_buf, "Temp:%.1f,Humi:%.1f", wifi_data.temperature, wifi_data.humidity);
-            // 假设 ESP8266_SendData 返回 0 是成功，返回其他数字是失败
-            if (ESP8266_SendData(send_buf) != 0) { 
-							 g_wifi_error_count++;
-                printf("发送失败 (link is not valid)，5秒后尝试重连 TCP...\r\n");
-                HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPCLOSE\r\n", 13, 1000); osDelay(500); // 先断开旧的连接，防止状态卡死
-							HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPSTART=\"TCP\",\"服务端IP\",8899\r\n", 100, 2000);  // 重新发起 TCP 连接
-                osDelay(2000); // 给 ESP8266 充足的反应时间
-            }else {
-                  g_wifi_error_count = 0;
+        g_heartbeat_wifi = osKernelGetTickCount();
+        if (ESP8266_Poll() == 1) {
+            if (osMessageQueueGet(Queue_WiFiHandle, &wifi_data, NULL, 1000) == osOK) {
+                snprintf(send_buf, sizeof(send_buf), "Temp:%.1f,Humi:%.1f",
+                         wifi_data.temperature, wifi_data.humidity);
+                if (ESP8266_SendData(send_buf) != 0) {
+                    g_wifi_error_count++;
+                    printf("TCP send fail, reconnect\r\n");
+                } else {
+                    g_wifi_error_count = 0;
+                }
             }
+        } else {
+            osDelay(20);
         }
-        osDelay(100);
     }
 }  
 void StartStatusLEDTask(void *argument) {
     for(;;) {
-        if (g_wifi_error_count >= 3) {// WiFi 连续失败 3 次：快闪 5 下
+        if ((g_wifi_error_count >= 3) || (ESP8266_FailStreak() >= 3)) {
             for(int i=0; i<5; i++) {
                 HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET); // 亮
                 osDelay(100);
@@ -180,14 +191,24 @@ void StartStatusLEDTask(void *argument) {
 void StartWatchDogTask(void *argument)
 {
     uint32_t now;
+    uint8_t mark_div = 0;
     for(;;)
     {
         now = osKernelGetTickCount();
         if ((now - g_heartbeat_dht  < 5000) &&
             (now - g_heartbeat_oled < 5000) &&
-            (now - g_heartbeat_key  < 5000))
+            (now - g_heartbeat_key  < 5000) &&
+            (now - g_heartbeat_wifi < 5000))
         {
             HAL_IWDG_Refresh(&hiwdg);
+        }
+        if (++mark_div >= 20) {
+            mark_div = 0;
+            printf("HW DHT=%lu OLED=%lu KEY=%lu WIFI=%lu\r\n",
+                   (unsigned long)uxTaskGetStackHighWaterMark((TaskHandle_t)DHT_TaskHandle),
+                   (unsigned long)uxTaskGetStackHighWaterMark((TaskHandle_t)OLED_TaskHandle),
+                   (unsigned long)uxTaskGetStackHighWaterMark((TaskHandle_t)Key_TaskHandle),
+                   (unsigned long)uxTaskGetStackHighWaterMark((TaskHandle_t)WiFi_TaskHandle));
         }
         osDelay(500);
     }
